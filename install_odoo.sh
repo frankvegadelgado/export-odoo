@@ -75,11 +75,21 @@ fi
 TMP_DIR=$(mktemp -d)
 tar -xzf "$SCRIPT_DIR/$TARBALL" -C "$TMP_DIR"
 
-# El tarball extrae a una subcarpeta (ej: odoo-18.0.YYYYMMDD); la movemos a ODOO_HOME
-EXTRACTED=$(ls "$TMP_DIR")
+# El tarball extrae a una subcarpeta (ej: odoo-18.0.YYYYMMDD); movemos su contenido a ODOO_HOME
+EXTRACTED_DIR="$TMP_DIR/$(ls "$TMP_DIR")"
 sudo rm -rf "$ODOO_HOME"
-sudo mv "$TMP_DIR/$EXTRACTED" "$ODOO_HOME"
+sudo mkdir -p "$ODOO_HOME"
+sudo mv "$EXTRACTED_DIR"/* "$ODOO_HOME"/
 sudo chown -R $ODOO_USER:$ODOO_USER "$ODOO_HOME"
+
+# Verificar que odoo-bin quedó en el lugar correcto
+if [ ! -f "$ODOO_HOME/odoo-bin" ]; then
+    echo "ADVERTENCIA: odoo-bin no está en $ODOO_HOME, buscando..."
+    FOUND=$(find "$ODOO_HOME" -name "odoo-bin" 2>/dev/null | head -1)
+    echo "odoo-bin encontrado en: $FOUND"
+else
+    echo "odoo-bin correctamente ubicado en: $ODOO_HOME/odoo-bin"
+fi
 
 echo "=== Instalando Python 3.11 ==="
 sudo apt install -y python3.11 python3.11-venv python3.11-dev
@@ -94,6 +104,9 @@ sudo sed -i 's/cbor2==5\.4\.2/cbor2>=5.4.6/' $ODOO_HOME/requirements.txt
 echo "Parche aplicado: cbor2==5.4.2 -> cbor2>=5.4.6"
 
 sudo $ODOO_HOME/venv/bin/pip install -r $ODOO_HOME/requirements.txt
+# Registrar Odoo como paquete editable para poder usar: python -m odoo
+# Debe correr como root ya que el venv fue creado con sudo
+cd $ODOO_HOME && sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
 sudo chown -R $ODOO_USER:$ODOO_USER $ODOO_HOME/venv
 
 echo "=== Configurando archivo de Odoo ==="
@@ -113,5 +126,11 @@ sudo chown $ODOO_USER:$ODOO_USER /var/log/odoo
 
 echo "=== Instalación completada ==="
 echo "Para iniciar Odoo:"
-echo "  sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python $ODOO_HOME/odoo-bin -c $ODOO_CONF"
+if [ -f "$ODOO_HOME/odoo-bin" ]; then
+    echo "  sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python $ODOO_HOME/odoo-bin -c $ODOO_CONF"
+elif [ -f "$ODOO_HOME/venv/bin/odoo" ]; then
+    echo "  sudo -u $ODOO_USER $ODOO_HOME/venv/bin/odoo -c $ODOO_CONF"
+else
+    echo "  cd $ODOO_HOME && sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python -m odoo -c $ODOO_CONF"
+fi
 echo "Luego abre en navegador: http://localhost:8069"
