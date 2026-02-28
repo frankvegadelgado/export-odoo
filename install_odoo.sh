@@ -2,6 +2,8 @@
 # =============================================================================
 # Automatic Odoo 18 Community + PostgreSQL installer
 # Tested on Ubuntu 22.04 / Debian
+# No virtualenv — installs Python packages system-wide so the odoo user
+# can always import them regardless of how the process is launched.
 # Usage: sudo ./install_odoo.sh
 # =============================================================================
 
@@ -38,9 +40,9 @@ done
 
 # -- Install system dependencies -----------------------------------------------
 echo "=== Installing system dependencies ==="
-sudo apt install -y wget curl python3 python3-pip python3-venv build-essential \
-                    libpq-dev postgresql nano \
-                    libldap2-dev libsasl2-dev libssl-dev
+sudo apt install -y wget curl build-essential nano postgresql \
+                    libpq-dev libldap2-dev libsasl2-dev libssl-dev \
+                    python3.11 python3.11-dev python3-pip
 
 # -- Configure PostgreSQL ------------------------------------------------------
 echo "=== Configuring PostgreSQL ==="
@@ -82,7 +84,7 @@ fi
 
 # -- Extract tarball into ODOO_HOME --------------------------------------------
 # The tarball extracts into a versioned subfolder (e.g. odoo-18.0.20250227)
-# We move its contents directly into ODOO_HOME so odoo-bin / setup.py sit at root
+# We move its contents directly into ODOO_HOME so setup.py sits at root.
 echo "=== Extracting Odoo ==="
 TMP_DIR=$(mktemp -d)
 tar -xzf "$SCRIPT_DIR/$TARBALL" -C "$TMP_DIR"
@@ -93,66 +95,45 @@ sudo mkdir -p "$ODOO_HOME"
 sudo mv "$EXTRACTED_DIR"/* "$ODOO_HOME"/
 sudo chown -R $ODOO_USER:$ODOO_USER "$ODOO_HOME"
 
-# Verify the layout
-if [ -f "$ODOO_HOME/odoo-bin" ]; then
-    echo "odoo-bin found at: $ODOO_HOME/odoo-bin"
-elif [ -f "$ODOO_HOME/setup.py" ]; then
-    echo "setup.py found — Odoo will be launched via: python -m odoo"
+if [ -f "$ODOO_HOME/setup.py" ]; then
+    echo "setup.py found at $ODOO_HOME — OK."
 else
-    echo "WARNING: Neither odoo-bin nor setup.py found in $ODOO_HOME"
+    echo "ERROR: setup.py not found in $ODOO_HOME"
     echo "Contents: $(ls $ODOO_HOME)"
+    exit 1
 fi
 
-# -- Install Python 3.11 -------------------------------------------------------
-# Odoo 18 requires Python 3.11+. Ubuntu 22.04 ships with 3.10 by default.
-echo "=== Installing Python 3.11 ==="
-sudo apt install -y python3.11 python3.11-venv python3.11-dev
+# -- Install Python dependencies system-wide -----------------------------------
+# No virtualenv — installs into the system Python 3.11 so any user (including
+# the odoo system user) can import packages without activation steps.
+echo "=== Upgrading pip, setuptools, wheel ==="
+sudo python3.11 -m pip install --upgrade pip setuptools wheel
 
-# -- Create virtualenv and install Python dependencies ------------------------
-echo "=== Creating Python virtual environment ==="
-sudo python3.11 -m venv $ODOO_HOME/venv
-sudo $ODOO_HOME/venv/bin/pip install --upgrade pip setuptools wheel
-
-# cbor2==5.4.2 uses pkg_resources which was removed from modern setuptools.
-# Patch it to a newer version that uses pyproject.toml instead.
+# cbor2==5.4.2 uses pkg_resources removed from modern setuptools — patch it.
 sudo sed -i 's/cbor2==5\.4\.2/cbor2>=5.4.6/' $ODOO_HOME/requirements.txt
 echo "Patched: cbor2==5.4.2 -> cbor2>=5.4.6"
 
-echo "=== Installing Python requirements ==="
-sudo $ODOO_HOME/venv/bin/pip install -r $ODOO_HOME/requirements.txt
+echo "=== Installing Odoo Python requirements system-wide ==="
+sudo python3.11 -m pip install -r $ODOO_HOME/requirements.txt
 
-# Register Odoo as an editable package so it can be launched via: python -m odoo
-# Must run as root because the venv was created with sudo
-echo "=== Registering Odoo as editable package ==="
-cd $ODOO_HOME && sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
+# Register Odoo itself so 'import odoo' and 'python3.11 -m odoo' work
+echo "=== Registering Odoo package system-wide ==="
+cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps
 
-# Verify the package is actually importable — retry up to 3 times if not
-for attempt in 1 2 3; do
-    if $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-        echo "Odoo package verified importable (attempt $attempt)."
-        break
-    else
-        echo "WARNING: 'import odoo' failed on attempt $attempt. Retrying pip install -e ..."
-        sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
-        if [ $attempt -eq 3 ]; then
-            echo "ERROR: Odoo package could not be registered after 3 attempts."
-            echo "Contents of $ODOO_HOME:"
-            ls -la $ODOO_HOME
-            exit 1
-        fi
-    fi
-done
-
-# Hand ownership of the venv back to the odoo user
-sudo chown -R $ODOO_USER:$ODOO_USER $ODOO_HOME/venv
-
-# Verify one final time as the odoo user
-if sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-    echo "Odoo importable as user '$ODOO_USER'. Installation verified."
+# -- Verify import works for both root and the odoo user ----------------------
+echo "=== Verifying Odoo is importable ==="
+if python3.11 -c "import odoo; print('  root: import odoo OK —', odoo.__version__)"; then
+    true
 else
-    echo "WARNING: 'import odoo' failed as user '$ODOO_USER' after chown."
-    echo "Re-running pip install -e . after ownership change..."
-    sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
+    echo "ERROR: 'import odoo' failed for root. Installation may be broken."
+    exit 1
+fi
+
+if sudo -u $ODOO_USER python3.11 -c "import odoo; print('  odoo user: import odoo OK —', odoo.__version__)"; then
+    true
+else
+    echo "ERROR: 'import odoo' failed for user '$ODOO_USER'."
+    exit 1
 fi
 
 # -- Write Odoo configuration file ---------------------------------------------
@@ -176,11 +157,5 @@ sudo chown $ODOO_USER:$ODOO_USER /var/log/odoo
 echo ""
 echo "=== Installation complete ==="
 echo "To start Odoo:"
-if [ -f "$ODOO_HOME/odoo-bin" ]; then
-    echo "  sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python $ODOO_HOME/odoo-bin -c $ODOO_CONF"
-elif [ -f "$ODOO_HOME/venv/bin/odoo" ]; then
-    echo "  sudo -u $ODOO_USER $ODOO_HOME/venv/bin/odoo -c $ODOO_CONF"
-else
-    echo "  cd $ODOO_HOME && sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python -m odoo -c $ODOO_CONF"
-fi
+echo "  sudo -u $ODOO_USER python3.11 -m odoo -c $ODOO_CONF"
 echo "Then open in browser: http://localhost:8069"

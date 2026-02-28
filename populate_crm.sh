@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Populate Odoo 18 CRM with ~1500 realistic leads/opportunities via XML-RPC
+# No virtualenv — uses system-wide python3.11 matching the install script.
 # Usage: sudo ./populate_crm.sh
 # =============================================================================
 
@@ -9,56 +10,23 @@ set -e
 # -- Connection settings -------------------------------------------------------
 ODOO_URL="http://localhost:8069"
 ODOO_DB="odoo"
-ODOO_USER="admin"
-ODOO_PASS="admin"
+ODOO_ADMIN_USER="admin"
+ODOO_ADMIN_PASS="admin"
 ODOO_HOME="/opt/odoo"
 ODOO_CONF="/etc/odoo.conf"
 ODOO_SYSTEM_USER="odoo"
 
-# -- Detect how to launch Odoo -------------------------------------------------
-# venv/bin/odoo exists but may fail if 'import odoo' doesn't work.
-# Always verify the module is importable before choosing a launch method.
-ODOO_LAUNCH_CMD=""
-
-if [ -f "$ODOO_HOME/odoo-bin" ]; then
-    # Classic standalone binary
-    ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/python $ODOO_HOME/odoo-bin"
-    echo "Launch method: standalone odoo-bin"
-
-elif [ -f "$ODOO_HOME/venv/bin/odoo" ] && \
-     $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-    # Entry point script + odoo module is importable
-    ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/odoo"
-    echo "Launch method: venv/bin/odoo (package entry point)"
-
-elif [ -d "$ODOO_HOME/odoo" ] && [ -f "$ODOO_HOME/setup.py" ]; then
-    # setup.py based install — use python -m odoo directly
-    echo "venv/bin/odoo entry point not usable, falling back to: python -m odoo"
-
-    # Re-run pip install -e . as root to ensure the package is registered
-    if ! $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-        echo "Registering Odoo package (pip install -e .)..."
-        cd "$ODOO_HOME" && sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
-        sudo chown -R $ODOO_SYSTEM_USER:$ODOO_SYSTEM_USER $ODOO_HOME/venv
-        cd - > /dev/null
-    fi
-
-    # Final check
-    if ! $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-        echo "ERROR: 'import odoo' still fails after pip install -e ."
-        echo "Try manually: cd /opt/odoo && sudo /opt/odoo/venv/bin/pip install -e . --no-deps"
+# -- Verify Odoo module is importable before trying to start ------------------
+echo "=== Verifying Odoo installation ==="
+if ! python3.11 -c "import odoo" 2>/dev/null; then
+    echo "ERROR: 'import odoo' failed. Re-registering package..."
+    cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps -q
+    if ! python3.11 -c "import odoo" 2>/dev/null; then
+        echo "ERROR: Odoo package could not be registered. Run install_odoo.sh first."
         exit 1
     fi
-
-    ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/python -m odoo"
-    echo "Launch method: python -m odoo"
-
-else
-    echo "ERROR: Could not find a way to launch Odoo in $ODOO_HOME"
-    echo "Contents of $ODOO_HOME:"
-    ls -la "$ODOO_HOME"
-    exit 1
 fi
+echo "Odoo module importable — OK."
 
 # -- Start Odoo if not already running ----------------------------------------
 ODOO_PID=""
@@ -72,7 +40,8 @@ if curl -s --max-time 3 "$ODOO_URL" > /dev/null 2>&1; then
 else
     echo "Odoo is not running. Starting it..."
 
-    sudo -u $ODOO_SYSTEM_USER $ODOO_LAUNCH_CMD -c $ODOO_CONF \
+    # Launch using system python3.11 — no venv needed
+    sudo -u $ODOO_SYSTEM_USER python3.11 -m odoo -c $ODOO_CONF \
         --without-demo=all \
         > /var/log/odoo/odoo-populate.log 2>&1 &
 
@@ -99,9 +68,8 @@ else
 fi
 
 # Step 2: wait until XML-RPC is actually ready.
-# Odoo can respond to HTTP requests before the database workers are fully
-# initialized, causing a 500 error on XML-RPC. We poll /xmlrpc/2/common
-# until it returns a valid version response.
+# Odoo opens the HTTP port before the database workers finish initializing.
+# Polling /xmlrpc/2/common until it returns a valid version response.
 echo "Waiting for XML-RPC to be ready (max 3 min)..."
 WAITED=0
 MAX_WAIT=180
@@ -111,7 +79,8 @@ until curl -s --max-time 5 \
     "$ODOO_URL/xmlrpc/2/common" 2>/dev/null | grep -q "server_version"; do
     if [ $WAITED -ge $MAX_WAIT ]; then
         echo "ERROR: XML-RPC did not become ready after ${MAX_WAIT}s."
-        echo "Check the log: /var/log/odoo/odoo-populate.log"
+        echo "Last 20 lines of log:"
+        tail -20 /var/log/odoo/odoo-populate.log 2>/dev/null || true
         [ "$ODOO_STARTED_BY_US" = true ] && kill $ODOO_PID 2>/dev/null || true
         exit 1
     fi
@@ -122,26 +91,11 @@ done
 echo "XML-RPC ready after ${WAITED}s.          "
 echo ""
 
-# -- Find Python interpreter ---------------------------------------------------
-PYTHON=""
-for py in "$ODOO_HOME/venv/bin/python" python3.11 python3 python; do
-    if [ -f "$py" ] || command -v "$py" &>/dev/null; then
-        PYTHON="$py"
-        break
-    fi
-done
-
-if [ -z "$PYTHON" ]; then
-    echo "ERROR: Python interpreter not found."
-    exit 1
-fi
-
-echo "Using interpreter: $PYTHON"
-echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_USER"
+# -- Embedded Python data insertion script ------------------------------------
+echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_ADMIN_USER"
 echo ""
 
-# -- Embedded Python data insertion script ------------------------------------
-$PYTHON - <<'PYEOF'
+python3.11 - <<'PYEOF'
 import xmlrpc.client
 import random
 import sys
@@ -168,7 +122,8 @@ except Exception as e:
 
 models = xmlrpc.client.ServerProxy(f"{URL}/xmlrpc/2/object", allow_none=True)
 
-# -- Sample data ---------------------------------------------------------------
+# -- Sample data — accented Spanish characters intentional ---------------------
+# These test whether CSV export handles UTF-8 / ANSI encoding correctly.
 FIRST_NAMES = [
     "Carlos","María","Juan","Ana","Luis","Laura","Pedro","Sofía","Miguel","Elena",
     "Fernando","Isabel","Alejandro","Patricia","Roberto","Carmen","Diego","Lucía",
@@ -240,9 +195,11 @@ TAGS = [
     "Presupuesto Aprobado","Tomador de Decisiones","Referido","Reactivación","Corporativo"
 ]
 
-STREET_SUFFIXES = ["Calle Principal","Av. Reforma","Blvd. del Valle","Calzada Independencia",
-                   "Paseo de la Constitución","Av. Revolución","Calle Álvaro Obregón",
-                   "Callejón Ángel García","Av. Lázaro Cárdenas","Calle Héroe de Nacozari"]
+STREET_SUFFIXES = [
+    "Calle Principal","Av. Reforma","Blvd. del Valle","Calzada Independencia",
+    "Paseo de la Constitución","Av. Revolución","Calle Álvaro Obregón",
+    "Callejón Ángel García","Av. Lázaro Cárdenas","Calle Héroe de Nacozari"
+]
 
 # -- Setup pipeline stages -----------------------------------------------------
 print("\n=== Setting up CRM pipeline stages ===")
@@ -295,14 +252,21 @@ errors   = 0
 print(f"\n=== Inserting {TOTAL} records into CRM (batches of {BATCH}) ===\n")
 
 def random_phone():
-    prefix = random.choice(["+1 305","+1 212","+1 310","+52 55","+52 81","+34 91"])
+    prefix = random.choice(["+52 55","+52 33","+52 81","+57 1","+34 91","+1 305"])
     number = "".join([str(random.randint(0,9)) for _ in range(8)])
     return f"{prefix} {number[:4]}-{number[4:]}"
 
 def random_email(first, last, company):
-    domain = ''.join(c for c in company.lower() if c.isalnum())[:12]
-    ext = random.choice(["com","net","org","io","co"])
-    return f"{first.lower()}.{last.lower()[:6]}@{domain}.{ext}"
+    # Strip accents for email addresses (invalid in standard email)
+    import unicodedata
+    def strip_accents(s):
+        return ''.join(c for c in unicodedata.normalize('NFD', s)
+                       if unicodedata.category(c) != 'Mn')
+    first_clean   = strip_accents(first).lower()
+    last_clean    = strip_accents(last).lower()[:6]
+    domain_clean  = ''.join(c for c in strip_accents(company).lower() if c.isalnum())[:12]
+    ext = random.choice(["com","mx","net","org","com.mx"])
+    return f"{first_clean}.{last_clean}@{domain_clean}.{ext}"
 
 for batch_start in range(0, TOTAL, BATCH):
     batch_records = []
@@ -321,7 +285,7 @@ for batch_start in range(0, TOTAL, BATCH):
         lost = (not won and random.random() < 0.1)
 
         record = {
-            'name'            : f"Opportunity - {company} / {last}, {first}",
+            'name'            : f"Oportunidad - {company} / {last}, {first}",
             'contact_name'    : f"{first} {last}",
             'partner_name'    : company,
             'email_from'      : random_email(first, last, company),
@@ -381,7 +345,7 @@ if [ "$ODOO_STARTED_BY_US" = true ] && [ -n "$ODOO_PID" ]; then
     kill $ODOO_PID 2>/dev/null || true
     wait $ODOO_PID 2>/dev/null || true
     echo "Odoo stopped."
-    echo "To start it again: sudo -u $ODOO_SYSTEM_USER $ODOO_LAUNCH_CMD -c $ODOO_CONF"
+    echo "To start it again: sudo -u $ODOO_SYSTEM_USER python3.11 -m odoo -c $ODOO_CONF"
 else
     echo "Odoo is still running at $ODOO_URL"
 fi
