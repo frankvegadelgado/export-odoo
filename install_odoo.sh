@@ -126,8 +126,34 @@ sudo $ODOO_HOME/venv/bin/pip install -r $ODOO_HOME/requirements.txt
 echo "=== Registering Odoo as editable package ==="
 cd $ODOO_HOME && sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
 
+# Verify the package is actually importable — retry up to 3 times if not
+for attempt in 1 2 3; do
+    if $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
+        echo "Odoo package verified importable (attempt $attempt)."
+        break
+    else
+        echo "WARNING: 'import odoo' failed on attempt $attempt. Retrying pip install -e ..."
+        sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
+        if [ $attempt -eq 3 ]; then
+            echo "ERROR: Odoo package could not be registered after 3 attempts."
+            echo "Contents of $ODOO_HOME:"
+            ls -la $ODOO_HOME
+            exit 1
+        fi
+    fi
+done
+
 # Hand ownership of the venv back to the odoo user
 sudo chown -R $ODOO_USER:$ODOO_USER $ODOO_HOME/venv
+
+# Verify one final time as the odoo user
+if sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
+    echo "Odoo importable as user '$ODOO_USER'. Installation verified."
+else
+    echo "WARNING: 'import odoo' failed as user '$ODOO_USER' after chown."
+    echo "Re-running pip install -e . after ownership change..."
+    sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
+fi
 
 # -- Write Odoo configuration file ---------------------------------------------
 echo "=== Writing Odoo configuration file ==="

@@ -16,30 +16,49 @@ ODOO_CONF="/etc/odoo.conf"
 ODOO_SYSTEM_USER="odoo"
 
 # -- Detect how to launch Odoo -------------------------------------------------
+# venv/bin/odoo exists but may fail if 'import odoo' doesn't work.
+# Always verify the module is importable before choosing a launch method.
 ODOO_LAUNCH_CMD=""
 
 if [ -f "$ODOO_HOME/odoo-bin" ]; then
     # Classic standalone binary
     ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/python $ODOO_HOME/odoo-bin"
-elif [ -f "$ODOO_HOME/venv/bin/odoo" ]; then
-    # Installed as package via pip install -e .
+    echo "Launch method: standalone odoo-bin"
+
+elif [ -f "$ODOO_HOME/venv/bin/odoo" ] && \
+     $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
+    # Entry point script + odoo module is importable
     ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/odoo"
+    echo "Launch method: venv/bin/odoo (package entry point)"
+
 elif [ -d "$ODOO_HOME/odoo" ] && [ -f "$ODOO_HOME/setup.py" ]; then
-    # Tarball install with setup.py — use python -m odoo
-    ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/python -m odoo"
+    # setup.py based install — use python -m odoo directly
+    echo "venv/bin/odoo entry point not usable, falling back to: python -m odoo"
+
+    # Re-run pip install -e . as root to ensure the package is registered
     if ! $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
-        echo "Installing Odoo as editable package..."
+        echo "Registering Odoo package (pip install -e .)..."
         cd "$ODOO_HOME" && sudo $ODOO_HOME/venv/bin/pip install -e . --no-deps -q
+        sudo chown -R $ODOO_SYSTEM_USER:$ODOO_SYSTEM_USER $ODOO_HOME/venv
         cd - > /dev/null
     fi
+
+    # Final check
+    if ! $ODOO_HOME/venv/bin/python -c "import odoo" 2>/dev/null; then
+        echo "ERROR: 'import odoo' still fails after pip install -e ."
+        echo "Try manually: cd /opt/odoo && sudo /opt/odoo/venv/bin/pip install -e . --no-deps"
+        exit 1
+    fi
+
+    ODOO_LAUNCH_CMD="$ODOO_HOME/venv/bin/python -m odoo"
+    echo "Launch method: python -m odoo"
+
 else
     echo "ERROR: Could not find a way to launch Odoo in $ODOO_HOME"
     echo "Contents of $ODOO_HOME:"
     ls -la "$ODOO_HOME"
     exit 1
 fi
-
-echo "Launch method: $ODOO_LAUNCH_CMD"
 
 # -- Start Odoo if not already running ----------------------------------------
 ODOO_PID=""
