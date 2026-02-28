@@ -107,29 +107,29 @@ fi
 # No virtualenv — installs into the system Python 3.11 so any user (including
 # the odoo system user) can import packages without activation steps.
 echo "=== Upgrading pip, setuptools, wheel ==="
-sudo python3.11 -m pip install --upgrade pip setuptools wheel
+sudo python3.11 -m pip install --upgrade pip setuptools wheel --root-user-action=ignore
 
 # cbor2==5.4.2 uses pkg_resources removed from modern setuptools — patch it.
 sudo sed -i 's/cbor2==5\.4\.2/cbor2>=5.4.6/' $ODOO_HOME/requirements.txt
 echo "Patched: cbor2==5.4.2 -> cbor2>=5.4.6"
 
 echo "=== Installing Odoo Python requirements system-wide ==="
-sudo python3.11 -m pip install -r $ODOO_HOME/requirements.txt
+sudo python3.11 -m pip install -r $ODOO_HOME/requirements.txt --root-user-action=ignore
 
 # Register Odoo itself so 'import odoo' and 'python3.11 -m odoo' work
 echo "=== Registering Odoo package system-wide ==="
-cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps
+cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps --root-user-action=ignore
 
 # -- Verify import works for both root and the odoo user ----------------------
 echo "=== Verifying Odoo is importable ==="
-if python3.11 -c "import odoo; print('  root: import odoo OK —', odoo.__version__)"; then
+if python3.11 -c "import odoo; print('  root       : import odoo OK')"; then
     true
 else
     echo "ERROR: 'import odoo' failed for root. Installation may be broken."
     exit 1
 fi
 
-if sudo -u $ODOO_USER python3.11 -c "import odoo; print('  odoo user: import odoo OK —', odoo.__version__)"; then
+if sudo -u $ODOO_USER python3.11 -c "import odoo; print('  odoo user  : import odoo OK')"; then
     true
 else
     echo "ERROR: 'import odoo' failed for user '$ODOO_USER'."
