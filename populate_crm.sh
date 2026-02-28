@@ -16,11 +16,30 @@ ODOO_HOME="/opt/odoo"
 ODOO_CONF="/etc/odoo.conf"
 ODOO_SYSTEM_USER="odoo"
 
-# -- Verify Odoo module is importable before trying to start ------------------
+# -- Detect the correct Odoo launcher -----------------------------------------
+# After system-wide pip install -e ., pip creates an entry point at
+# /usr/local/bin/odoo. Using python3.11 -m odoo does NOT work because
+# odoo/__main__.py uses relative imports that fail when run as __main__.
+ODOO_BIN=""
+for candidate in /usr/local/bin/odoo /usr/bin/odoo; do
+    if [ -f "$candidate" ]; then
+        ODOO_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$ODOO_BIN" ]; then
+    echo "ERROR: Odoo entry point not found in /usr/local/bin or /usr/bin."
+    echo "The pip install -e . step may not have completed. Run install_odoo.sh first."
+    exit 1
+fi
+echo "Odoo launcher: $ODOO_BIN"
+
+
 echo "=== Verifying Odoo installation ==="
 if ! python3.11 -c "import odoo" 2>/dev/null; then
     echo "ERROR: 'import odoo' failed. Re-registering package..."
-    cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps -q
+    cd $ODOO_HOME && sudo python3.11 -m pip install -e . --no-deps -q --root-user-action=ignore
     if ! python3.11 -c "import odoo" 2>/dev/null; then
         echo "ERROR: Odoo package could not be registered. Run install_odoo.sh first."
         exit 1
@@ -40,8 +59,9 @@ if curl -s --max-time 3 "$ODOO_URL" > /dev/null 2>&1; then
 else
     echo "Odoo is not running. Starting it..."
 
-    # Launch using system python3.11 — no venv needed
-    sudo -u $ODOO_SYSTEM_USER python3.11 -m odoo -c $ODOO_CONF \
+    # Use the pip-installed entry point — python3.11 -m odoo fails due to
+    # relative imports in odoo/__main__.py when run as __main__
+    sudo -u $ODOO_SYSTEM_USER $ODOO_BIN -c $ODOO_CONF \
         --without-demo=all \
         > /var/log/odoo/odoo-populate.log 2>&1 &
 
@@ -49,46 +69,39 @@ else
     ODOO_STARTED_BY_US=true
     echo "Odoo started with PID $ODOO_PID"
 
-    # Step 1: wait for HTTP port to open
-    echo "Waiting for HTTP port to open (max 3 min)..."
+    # Single loop: check if process is still alive AND XML-RPC responds.
+    # If Odoo crashes we detect it immediately instead of waiting 3 minutes.
+    echo "Waiting for Odoo to be ready (max 3 min)..."
     WAITED=0
     MAX_WAIT=180
-    until curl -s --max-time 3 "$ODOO_URL" > /dev/null 2>&1; do
-        if [ $WAITED -ge $MAX_WAIT ]; then
-            echo "ERROR: Odoo HTTP did not respond after ${MAX_WAIT}s."
-            echo "Check the log: /var/log/odoo/odoo-populate.log"
-            kill $ODOO_PID 2>/dev/null || true
+    until curl -s --max-time 5 \
+        -H "Content-Type: text/xml" \
+        --data '<?xml version="1.0"?><methodCall><methodName>version</methodName><params></params></methodCall>' \
+        "$ODOO_URL/xmlrpc/2/common" 2>/dev/null | grep -q "server_version"; do
+
+        # Check if the process is still running using ps (no signals sent)
+        if ! ps -p $ODOO_PID > /dev/null 2>&1; then
+            echo ""
+            echo "ERROR: Odoo process exited before becoming ready."
+            echo "Last 30 lines of log:"
+            tail -30 /var/log/odoo/odoo-populate.log 2>/dev/null || true
             exit 1
         fi
-        printf "  Waiting for HTTP... ${WAITED}s\r"
+
+        if [ $WAITED -ge $MAX_WAIT ]; then
+            echo ""
+            echo "ERROR: Odoo did not respond after ${MAX_WAIT}s."
+            echo "Last 30 lines of log:"
+            tail -30 /var/log/odoo/odoo-populate.log 2>/dev/null || true
+            exit 1
+        fi
+
+        printf "  Waiting... ${WAITED}s\r"
         sleep 5
         WAITED=$((WAITED + 5))
     done
-    echo "HTTP port open after ${WAITED}s.          "
+    echo "Odoo ready after ${WAITED}s.          "
 fi
-
-# Step 2: wait until XML-RPC is actually ready.
-# Odoo opens the HTTP port before the database workers finish initializing.
-# Polling /xmlrpc/2/common until it returns a valid version response.
-echo "Waiting for XML-RPC to be ready (max 3 min)..."
-WAITED=0
-MAX_WAIT=180
-until curl -s --max-time 5 \
-    -H "Content-Type: text/xml" \
-    --data '<?xml version="1.0"?><methodCall><methodName>version</methodName><params></params></methodCall>' \
-    "$ODOO_URL/xmlrpc/2/common" 2>/dev/null | grep -q "server_version"; do
-    if [ $WAITED -ge $MAX_WAIT ]; then
-        echo "ERROR: XML-RPC did not become ready after ${MAX_WAIT}s."
-        echo "Last 20 lines of log:"
-        tail -20 /var/log/odoo/odoo-populate.log 2>/dev/null || true
-        [ "$ODOO_STARTED_BY_US" = true ] && kill $ODOO_PID 2>/dev/null || true
-        exit 1
-    fi
-    printf "  XML-RPC not ready yet... ${WAITED}s\r"
-    sleep 5
-    WAITED=$((WAITED + 5))
-done
-echo "XML-RPC ready after ${WAITED}s.          "
 echo ""
 
 # -- Embedded Python data insertion script ------------------------------------
@@ -341,11 +354,9 @@ echo "=== Script complete ==="
 # -- Stop Odoo if we started it ------------------------------------------------
 if [ "$ODOO_STARTED_BY_US" = true ] && [ -n "$ODOO_PID" ]; then
     echo ""
-    echo "=== Stopping Odoo (PID $ODOO_PID) ==="
-    kill $ODOO_PID 2>/dev/null || true
-    wait $ODOO_PID 2>/dev/null || true
-    echo "Odoo stopped."
-    echo "To start it again: sudo -u $ODOO_SYSTEM_USER python3.11 -m odoo -c $ODOO_CONF"
+    echo "Note: Odoo (PID $ODOO_PID) was started by this script and is still running."
+    echo "To stop it: sudo pkill -f 'odoo -c $ODOO_CONF'"
+    echo "To start it again: sudo -u $ODOO_SYSTEM_USER $ODOO_BIN -c $ODOO_CONF"
 else
     echo "Odoo is still running at $ODOO_URL"
 fi

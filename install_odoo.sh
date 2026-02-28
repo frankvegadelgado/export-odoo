@@ -154,8 +154,23 @@ sudo mkdir -p /var/log/odoo
 sudo chown $ODOO_USER:$ODOO_USER /var/log/odoo
 
 # -- Done ----------------------------------------------------------------------
+# Detect the entry point pip created
+ODOO_BIN=""
+for candidate in /usr/local/bin/odoo /usr/bin/odoo; do
+    if [ -f "$candidate" ]; then
+        ODOO_BIN="$candidate"
+        break
+    fi
+done
+
 echo ""
 echo "=== Installation complete ==="
-echo "To start Odoo:"
-echo "  sudo -u $ODOO_USER python3.11 -m odoo -c $ODOO_CONF"
+if [ -n "$ODOO_BIN" ]; then
+    echo "Odoo entry point: $ODOO_BIN"
+    echo "To start Odoo:"
+    echo "  sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF"
+else
+    echo "WARNING: Odoo entry point not found in /usr/local/bin or /usr/bin."
+    echo "The pip install -e . step may have failed."
+fi
 echo "Then open in browser: http://localhost:8069"
