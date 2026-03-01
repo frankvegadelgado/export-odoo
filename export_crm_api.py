@@ -133,12 +133,28 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
             order="id asc",
         )
 
+        # Resolve all tag IDs for this batch in ONE call — not per record
+        all_tag_ids = list({tid for r in records for tid in (r.get("tag_ids") or [])})
+        tag_name_map = {}
+        if all_tag_ids:
+            # call() wraps positional args, so pass ids directly (not nested)
+            raw_tags = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "crm.tag", "read",
+                [all_tag_ids],
+                {"fields": ["name"]},
+            )
+            for t in raw_tags:
+                # name is jsonb in Odoo 18: {"es_ES": "Urgente"} — extract first value
+                n = t["name"]
+                if isinstance(n, dict):
+                    n = next(iter(n.values()), "")
+                tag_name_map[t["id"]] = unicodedata.normalize("NFC", str(n)).strip()
+
         for r in records:
-            # Resolve tag_ids: fetch names in one batch call per page
-            tag_names = ""
-            if r.get("tag_ids"):
-                tags = call("crm.tag", "read", [r["tag_ids"]], fields=["name"])
-                tag_names = " | ".join(t["name"] for t in tags)
+            tag_names = " | ".join(
+                tag_name_map.get(tid, "") for tid in (r.get("tag_ids") or [])
+            )
 
             row = [
                 r["id"],
