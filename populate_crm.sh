@@ -10,11 +10,14 @@ set -e
 # -- Connection settings -------------------------------------------------------
 ODOO_URL="http://localhost:8069"
 ODOO_DB="odoo"
+ODOO_USER="odoo"
 ODOO_ADMIN_USER="admin"
 ODOO_ADMIN_PASS="admin"
 ODOO_HOME="/opt/odoo"
 ODOO_CONF="/etc/odoo.conf"
-ODOO_SYSTEM_USER="odoo"
+ODOO_USER="odoo"
+ODOO_ADMIN_USER="admin"
+ODOO_ADMIN_PASS="admin"
 
 # -- Detect the correct Odoo launcher -----------------------------------------
 # After system-wide pip install -e ., pip creates an entry point at
@@ -59,7 +62,7 @@ if curl -s --max-time 3 "$ODOO_URL" > /dev/null 2>&1; then
 else
     echo "Odoo is not running. Starting it..."
 
-    sudo -u $ODOO_SYSTEM_USER $ODOO_BIN -c $ODOO_CONF \
+    sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF \
         --without-demo=all \
         > /var/log/odoo/odoo-populate.log 2>&1 &
 
@@ -99,19 +102,10 @@ else
 fi
 echo ""
 
-# -- Reset admin password so XML-RPC credentials are always known --------------
-echo "=== Setting admin password ==="
-ADMIN_HASH=$(python3.11 -c "
-from passlib.context import CryptContext
-print(CryptContext(['pbkdf2_sha512']).hash('admin'))
-")
-cd /tmp && sudo -u postgres psql -d $ODOO_DB -c \
-    "UPDATE res_users SET password='$ADMIN_HASH' WHERE login='admin';" > /dev/null 2>&1 || true
-echo "Admin password set to: admin"
-echo ""
+
 
 # -- Embedded Python data insertion script ------------------------------------
-echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_ADMIN_USER"
+echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_USER"
 echo ""
 
 python3.11 - <<'PYEOF'
@@ -359,7 +353,7 @@ if [ "$ODOO_STARTED_BY_US" = true ] && [ -n "$ODOO_PID" ]; then
     echo ""
     echo "Note: Odoo (PID $ODOO_PID) was started by this script and is still running."
     echo "To stop it: sudo pkill -f 'odoo -c $ODOO_CONF'"
-    echo "To start it again: sudo -u $ODOO_SYSTEM_USER $ODOO_BIN -c $ODOO_CONF"
+    echo "To start it again: sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF"
 else
     echo "Odoo is still running at $ODOO_URL"
 fi

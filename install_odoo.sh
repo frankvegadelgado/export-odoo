@@ -94,6 +94,8 @@ sudo rm -rf "$ODOO_HOME"
 sudo mkdir -p "$ODOO_HOME"
 sudo mv "$EXTRACTED_DIR"/* "$ODOO_HOME"/
 sudo chown -R $ODOO_USER:$ODOO_USER "$ODOO_HOME"
+sudo mkdir -p "$ODOO_HOME/addons"
+sudo chown $ODOO_USER:$ODOO_USER "$ODOO_HOME/addons"
 
 if [ -f "$ODOO_HOME/setup.py" ]; then
     echo "setup.py found at $ODOO_HOME — OK."
@@ -115,6 +117,7 @@ echo "Patched: cbor2==5.4.2 -> cbor2>=5.4.6"
 
 echo "=== Installing Odoo Python requirements system-wide ==="
 sudo python3.11 -m pip install -r $ODOO_HOME/requirements.txt --root-user-action=ignore
+
 
 # Register Odoo itself so 'import odoo' and 'python3.11 -m odoo' work
 echo "=== Registering Odoo package system-wide ==="
@@ -152,6 +155,42 @@ EOF
 echo "=== Creating log directory ==="
 sudo mkdir -p /var/log/odoo
 sudo chown $ODOO_USER:$ODOO_USER /var/log/odoo
+
+# -- Initialise Odoo database --------------------------------------------------
+# Creates the admin user and base tables. Required before populate_crm.sh runs.
+echo "=== Stopping any running Odoo instance before DB init ==="
+pkill -f "odoo -c $ODOO_CONF" 2>/dev/null || true
+sleep 3
+
+echo "=== Initialising Odoo database (this may take a few minutes) ==="
+ODOO_BIN=""
+for candidate in /usr/local/bin/odoo /usr/bin/odoo; do
+    if [ -f "$candidate" ]; then
+        ODOO_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$ODOO_BIN" ]; then
+    echo "ERROR: Odoo entry point not found. The pip install -e . step may have failed."
+    exit 1
+fi
+
+DB_INITIALIZED=$(cd /tmp && sudo -u $ODOO_USER psql -d $DB_NAME -tAc     "SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module';" 2>/dev/null || true)
+
+if [ "$DB_INITIALIZED" = "1" ]; then
+    echo "Database already initialised, skipping."
+else
+    echo "=== Initialising Odoo database ==="
+    sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF --init base --stop-after-init --without-demo=all
+    # Verify it actually worked
+    DB_CHECK=$(cd /tmp && sudo -u $ODOO_USER psql -d $DB_NAME -tAc         "SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module';" 2>/dev/null || true)
+    if [ "$DB_CHECK" != "1" ]; then
+        echo "ERROR: Database initialisation failed. Check /var/log/odoo/odoo.log for details."
+        exit 1
+    fi
+    echo "Database initialised."
+fi
 
 # -- Done ----------------------------------------------------------------------
 # Detect the entry point pip created
