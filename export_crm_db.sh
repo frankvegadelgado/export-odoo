@@ -27,10 +27,19 @@ echo "Leads/opportunities to export: $ROW_COUNT"
 
 # -- Detect many2many tag relation table (name changed between Odoo versions) --
 echo "=== Detecting CRM tag relation table ==="
-TAG_REL=$(cd /tmp && sudo -u $DB_USER psql -d $DB_NAME -tAc     "SELECT tablename FROM pg_tables
-     WHERE (tablename LIKE '%crm%lead%tag%' OR tablename LIKE '%crm%tag%lead%')
-       AND tablename NOT LIKE '%iap%' AND tablename NOT LIKE '%mining%'
-     ORDER BY length(tablename) LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
+# Find the many2many table that links crm_lead to crm_tag specifically
+# by checking both the table name AND that it has a FK into crm_lead
+TAG_REL=$(cd /tmp && sudo -u $DB_USER psql -d $DB_NAME -tAc     "SELECT kcu.table_name
+     FROM information_schema.key_column_usage kcu
+     JOIN information_schema.referential_constraints rc
+       ON rc.constraint_name = kcu.constraint_name
+     JOIN information_schema.key_column_usage kcu2
+       ON kcu2.constraint_name = rc.unique_constraint_name
+     WHERE kcu2.table_name = 'crm_lead'
+       AND kcu.table_name NOT LIKE '%iap%'
+       AND kcu.table_name NOT LIKE '%mining%'
+       AND (kcu.table_name LIKE '%tag%' OR kcu.table_name LIKE '%crm_lead%')
+     ORDER BY length(kcu.table_name) LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
 
 if [ -z "$TAG_REL" ]; then
     echo "WARNING: CRM tag relation table not found — tags will be empty."
@@ -71,22 +80,23 @@ cd /tmp && sudo -u $DB_USER psql -d $DB_NAME -c \
         l.id,
         l.name                              AS opportunity_name,
         l.type,
-        l.active,
+        CASE WHEN l.active THEN 'True' ELSE 'False' END AS active,
         CASE WHEN l.probability IS NOT NULL
-             THEN ROUND(l.probability::numeric, 2)
+             THEN TRIM(TRAILING '0' FROM ROUND(l.probability::numeric, 2)::text)
+                  || CASE WHEN ROUND(l.probability::numeric,2)::text NOT LIKE '%.%' THEN '.0' ELSE '' END
              ELSE NULL END                  AS probability,
         l.expected_revenue,
         l.recurring_revenue,
         l.priority,
         l.date_deadline,
-        l.date_open,
-        l.date_closed,
-        l.date_conversion,
-        l.create_date,
-        l.write_date,
+        to_char(l.date_open, 'YYYY-MM-DD HH24:MI:SS') AS date_open,
+        to_char(l.date_closed, 'YYYY-MM-DD HH24:MI:SS') AS date_closed,
+        to_char(l.date_conversion, 'YYYY-MM-DD HH24:MI:SS') AS date_conversion,
+        to_char(l.create_date, 'YYYY-MM-DD HH24:MI:SS') AS create_date,
+        to_char(l.write_date, 'YYYY-MM-DD HH24:MI:SS') AS write_date,
 
         -- Stage
-        s.name                              AS stage_name,
+        s.name->>'$LANG_KEY'               AS stage_name,
         s.sequence                          AS stage_sequence,
 
         -- Partner / customer
@@ -97,7 +107,7 @@ cd /tmp && sudo -u $DB_USER psql -d $DB_NAME -c \
         p.street                            AS partner_street,
         p.city                              AS partner_city,
         p.zip                               AS partner_zip,
-        co.name                             AS partner_country,
+        co.name->>'$LANG_KEY'              AS partner_country,
 
         -- Company on the lead itself
         l.partner_name                      AS lead_contact_name,
@@ -107,20 +117,20 @@ cd /tmp && sudo -u $DB_USER psql -d $DB_NAME -c \
         l.street,
         l.city,
         l.zip,
-        lco.name                            AS lead_country,
+        lco.name->>'$LANG_KEY'             AS lead_country,
 
         -- Assigned user
         u.login                             AS assigned_user_login,
         ru.name                             AS assigned_user_name,
 
         -- Sales team
-        t.name                              AS sales_team,
+        t.name->>'$LANG_KEY'               AS sales_team,
 
         -- Tags (aggregated)
         $TAG_AGG                          AS tags,
 
         -- Lost reason
-        lr.name                             AS lost_reason,
+        lr.name->>'$LANG_KEY'              AS lost_reason,
 
         -- Campaign / UTM
         uc.name                             AS campaign,

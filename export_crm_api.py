@@ -44,19 +44,19 @@ FIELDS = [
     "campaign_id", "medium_id", "source_id",
 ]
 
-# CSV column headers (matches field order above + expanded many2one labels)
 HEADERS = [
     "id", "opportunity_name", "type", "active", "probability",
     "expected_revenue", "recurring_revenue", "priority",
     "date_deadline", "date_open", "date_closed", "date_conversion",
     "create_date", "write_date",
-    "stage_name",
-    "partner_name", "partner_id",
-    "email_from", "phone", "mobile",
-    "street", "city", "zip", "country",
+    "stage_name", "stage_sequence",
+    "partner_name", "partner_email", "partner_phone", "partner_mobile",
+    "partner_street", "partner_city", "partner_zip", "partner_country",
     "lead_contact_name",
-    "assigned_user", "user_id",
-    "sales_team", "team_id",
+    "email_from", "phone", "mobile",
+    "street", "city", "zip", "lead_country",
+    "assigned_user_login", "assigned_user_name",
+    "sales_team",
     "tags",
     "lost_reason",
     "campaign", "medium", "source",
@@ -84,7 +84,7 @@ def call(model, method, *args, **kwargs):
                              model, method, list(args), kwargs)
 
 # -- Count ---------------------------------------------------------------------
-total = call("crm.lead", "search_count", [])
+total = call("crm.lead", "search_count", [], context={"active_test": False})
 print(f"Leads/opportunities to export: {total}")
 
 if total == 0:
@@ -131,6 +131,7 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
             limit=BATCH_SIZE,
             offset=offset,
             order="id asc",
+            context={"active_test": False},
         )
 
         # Resolve all tag IDs for this batch in ONE call — not per record
@@ -151,17 +152,70 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
                     n = next(iter(n.values()), "")
                 tag_name_map[t["id"]] = unicodedata.normalize("NFC", str(n)).strip()
 
+        # Bulk-fetch partner details for this batch (email, phone, mobile, address)
+        partner_ids = list({r["partner_id"][0] for r in records
+                            if isinstance(r.get("partner_id"), (list, tuple))})
+        partner_map = {}
+        if partner_ids:
+            raw_partners = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "res.partner", "read",
+                [partner_ids],
+                {"fields": ["id", "email", "phone", "mobile",
+                            "street", "city", "zip", "country_id"]},
+            )
+            for p in raw_partners:
+                partner_map[p["id"]] = p
+
+        # Bulk-fetch stage sequence for this batch
+        stage_ids = list({r["stage_id"][0] for r in records
+                          if isinstance(r.get("stage_id"), (list, tuple))})
+        stage_map = {}
+        if stage_ids:
+            raw_stages = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "crm.stage", "read",
+                [stage_ids],
+                {"fields": ["id", "sequence"]},
+            )
+            for s in raw_stages:
+                stage_map[s["id"]] = s["sequence"]
+
+        # Bulk-fetch user login for this batch
+        user_ids = list({r["user_id"][0] for r in records
+                         if isinstance(r.get("user_id"), (list, tuple))})
+        user_login_map = {}
+        if user_ids:
+            raw_users = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "res.users", "read",
+                [user_ids],
+                {"fields": ["id", "login"]},
+            )
+            for u in raw_users:
+                user_login_map[u["id"]] = u["login"]
+
         for r in records:
             tag_names = " | ".join(
                 tag_name_map.get(tid, "") for tid in (r.get("tag_ids") or [])
             )
+
+            pid = r["partner_id"][0] if isinstance(r.get("partner_id"), (list, tuple)) else None
+            p = partner_map.get(pid, {})
+
+            sid = r["stage_id"][0] if isinstance(r.get("stage_id"), (list, tuple)) else None
+            stage_seq = stage_map.get(sid, "")
+
+            uid_val = r["user_id"][0] if isinstance(r.get("user_id"), (list, tuple)) else None
+            user_login = user_login_map.get(uid_val, "")
+            user_name  = flat(r["user_id"], index=1)
 
             row = [
                 r["id"],
                 flat(r["name"]),
                 flat(r["type"]),
                 r["active"],
-                r["probability"] if r["probability"] is not False else "",
+                (f"{r['probability']:.10g}" if r["probability"] is not False else ""),
                 r["expected_revenue"],
                 r["recurring_revenue"],
                 flat(r["priority"]),
@@ -173,10 +227,18 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
                 flat(r["write_date"]),
                 # stage
                 flat(r["stage_id"], index=1),
-                # partner
+                stage_seq,
+                # partner (from partner record)
                 flat(r["partner_id"], index=1),
-                flat(r["partner_id"], index=0),
-                # contact fields on lead
+                flat(p.get("email", "")),
+                flat(p.get("phone", "")),
+                flat(p.get("mobile", "")),
+                flat(p.get("street", "")),
+                flat(p.get("city", "")),
+                flat(p.get("zip", "")),
+                flat(p.get("country_id", ""), index=1),
+                # lead contact fields
+                flat(r["partner_name"]),
                 flat(r["email_from"]),
                 flat(r["phone"]),
                 flat(r["mobile"]),
@@ -184,13 +246,11 @@ with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
                 flat(r["city"]),
                 flat(r["zip"]),
                 flat(r["country_id"], index=1),
-                flat(r["partner_name"]),
                 # user
-                flat(r["user_id"], index=1),
-                flat(r["user_id"], index=0),
+                user_login,
+                user_name,
                 # team
                 flat(r["team_id"], index=1),
-                flat(r["team_id"], index=0),
                 # tags
                 tag_names,
                 # lost reason
