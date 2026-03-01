@@ -118,6 +118,10 @@ echo "Patched: cbor2==5.4.2 -> cbor2>=5.4.6"
 echo "=== Installing Odoo Python requirements system-wide ==="
 sudo python3.11 -m pip install -r $ODOO_HOME/requirements.txt --root-user-action=ignore
 
+# Shadow apt urllib3 with pip version — apt urllib3 mixes with pip cryptography
+# causing: ImportError: cannot import name AsymmetricSignatureContext
+sudo python3.11 -m pip install urllib3 --upgrade --ignore-installed --root-user-action=ignore
+
 
 # Register Odoo itself so 'import odoo' and 'python3.11 -m odoo' work
 echo "=== Registering Odoo package system-wide ==="
@@ -146,6 +150,7 @@ sudo tee $ODOO_CONF > /dev/null <<EOF
 addons_path = $ODOO_HOME/addons
 db_host = False
 db_port = False
+db_name = $DB_NAME
 db_user = $DB_USER
 db_password = False
 logfile = /var/log/odoo/odoo.log
@@ -162,7 +167,6 @@ echo "=== Stopping any running Odoo instance before DB init ==="
 pkill -f "odoo -c $ODOO_CONF" 2>/dev/null || true
 sleep 3
 
-echo "=== Initialising Odoo database (this may take a few minutes) ==="
 ODOO_BIN=""
 for candidate in /usr/local/bin/odoo /usr/bin/odoo; do
     if [ -f "$candidate" ]; then
@@ -176,21 +180,9 @@ if [ -z "$ODOO_BIN" ]; then
     exit 1
 fi
 
-DB_INITIALIZED=$(cd /tmp && sudo -u $ODOO_USER psql -d $DB_NAME -tAc     "SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module';" 2>/dev/null || true)
-
-if [ "$DB_INITIALIZED" = "1" ]; then
-    echo "Database already initialised, skipping."
-else
-    echo "=== Initialising Odoo database ==="
-    sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF --init base --stop-after-init --without-demo=all
-    # Verify it actually worked
-    DB_CHECK=$(cd /tmp && sudo -u $ODOO_USER psql -d $DB_NAME -tAc         "SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module';" 2>/dev/null || true)
-    if [ "$DB_CHECK" != "1" ]; then
-        echo "ERROR: Database initialisation failed. Check /var/log/odoo/odoo.log for details."
-        exit 1
-    fi
-    echo "Database initialised."
-fi
+echo "=== Initialising Odoo database (this may take a few minutes) ==="
+sudo -u $ODOO_USER $ODOO_BIN -c $ODOO_CONF --init base,crm --stop-after-init --without-demo=all >> /var/log/odoo/odoo.log 2>&1
+echo "Database initialised."
 
 # -- Done ----------------------------------------------------------------------
 # Detect the entry point pip created

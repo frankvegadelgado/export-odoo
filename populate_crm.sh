@@ -105,7 +105,7 @@ echo ""
 
 
 # -- Embedded Python data insertion script ------------------------------------
-echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_USER"
+echo "Connecting to: $ODOO_URL  DB: $ODOO_DB  User: $ODOO_ADMIN_USER"
 echo ""
 
 python3.11 - <<'PYEOF'
