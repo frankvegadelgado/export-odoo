@@ -59,8 +59,6 @@ if curl -s --max-time 3 "$ODOO_URL" > /dev/null 2>&1; then
 else
     echo "Odoo is not running. Starting it..."
 
-    # Use the pip-installed entry point — python3.11 -m odoo fails due to
-    # relative imports in odoo/__main__.py when run as __main__
     sudo -u $ODOO_SYSTEM_USER $ODOO_BIN -c $ODOO_CONF \
         --without-demo=all \
         > /var/log/odoo/odoo-populate.log 2>&1 &
@@ -69,8 +67,6 @@ else
     ODOO_STARTED_BY_US=true
     echo "Odoo started with PID $ODOO_PID"
 
-    # Single loop: check if process is still alive AND XML-RPC responds.
-    # If Odoo crashes we detect it immediately instead of waiting 3 minutes.
     echo "Waiting for Odoo to be ready (max 3 min)..."
     WAITED=0
     MAX_WAIT=180
@@ -79,7 +75,6 @@ else
         --data '<?xml version="1.0"?><methodCall><methodName>version</methodName><params></params></methodCall>' \
         "$ODOO_URL/xmlrpc/2/common" 2>/dev/null | grep -q "server_version"; do
 
-        # Check if the process is still running using ps (no signals sent)
         if ! ps -p $ODOO_PID > /dev/null 2>&1; then
             echo ""
             echo "ERROR: Odoo process exited before becoming ready."
@@ -102,6 +97,17 @@ else
     done
     echo "Odoo ready after ${WAITED}s.          "
 fi
+echo ""
+
+# -- Reset admin password so XML-RPC credentials are always known --------------
+echo "=== Setting admin password ==="
+ADMIN_HASH=$(python3.11 -c "
+from passlib.context import CryptContext
+print(CryptContext(['pbkdf2_sha512']).hash('admin'))
+")
+cd /tmp && sudo -u postgres psql -d $ODOO_DB -c \
+    "UPDATE res_users SET password='$ADMIN_HASH' WHERE login='admin';" > /dev/null 2>&1 || true
+echo "Admin password set to: admin"
 echo ""
 
 # -- Embedded Python data insertion script ------------------------------------
@@ -270,7 +276,6 @@ def random_phone():
     return f"{prefix} {number[:4]}-{number[4:]}"
 
 def random_email(first, last, company):
-    # Strip accents for email addresses (invalid in standard email)
     import unicodedata
     def strip_accents(s):
         return ''.join(c for c in unicodedata.normalize('NFD', s)
@@ -293,7 +298,6 @@ for batch_start in range(0, TOTAL, BATCH):
         stage   = random.choice(stage_ids)
         prob    = random.randint(5, 95)
 
-        # Won: 30% chance if in Won stage | Lost: 10% chance, archived
         won  = (stage == stage_ids[-1] and random.random() < 0.3)
         lost = (not won and random.random() < 0.1)
 
@@ -322,11 +326,10 @@ for batch_start in range(0, TOTAL, BATCH):
             record['active'] = True
             record['probability'] = 100.0
         elif lost:
-            record['active'] = False  # Archived — hidden from default list view
+            record['active'] = False
 
         batch_records.append(record)
 
-    # Insert batch
     try:
         new_ids = models.execute_kw(DB, uid, PASSWORD, 'crm.lead', 'create', [batch_records])
         count = len(new_ids) if isinstance(new_ids, list) else 1
@@ -351,7 +354,7 @@ PYEOF
 echo ""
 echo "=== Script complete ==="
 
-# -- Stop Odoo if we started it ------------------------------------------------
+# -- Note if Odoo was started by this script -----------------------------------
 if [ "$ODOO_STARTED_BY_US" = true ] && [ -n "$ODOO_PID" ]; then
     echo ""
     echo "Note: Odoo (PID $ODOO_PID) was started by this script and is still running."
